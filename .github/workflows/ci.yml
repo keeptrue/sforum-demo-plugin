@@ -50,6 +50,19 @@ jobs:
         with:
           bun-version: 1.4.2
 
+      # 带后端的包必须先有 backend/plugin：extension build 里的 digest/validate/test
+      # 会在清单声明 backend 时要求该二进制存在。纯前端包整步跳过。
+      - name: Build backend binary when the manifest declares one
+        working-directory: plugin
+        run: |
+          set -euo pipefail
+          HAS_BACKEND="$(python3 -c "import json;print('true' if json.load(open('$PACKAGE_DIR/sforum.extension.json')).get('backend') else 'false')")"
+          if [ "$HAS_BACKEND" != "true" ]; then
+            echo "manifest declares no backend in $PACKAGE_DIR/sforum.extension.json; skipping backend build"
+            exit 0
+          fi
+          (cd "$PACKAGE_DIR/backend" && CGO_ENABLED=0 go build -trimpath -o "$GITHUB_WORKSPACE/plugin/$PACKAGE_DIR/backend/plugin" ./)
+
       - name: Build frontend and refresh exact digests
         working-directory: sforum/apps/api
         run: go run ./cmd/sforum extension build "$GITHUB_WORKSPACE/plugin/$PACKAGE_DIR"
@@ -66,17 +79,20 @@ jobs:
         working-directory: sforum/apps/api
         run: go run ./cmd/sforum extension test "$GITHUB_WORKSPACE/plugin/$PACKAGE_DIR"
 
-      # extension build 会重写 frontend/admin/dist/* 与清单里的 digest；
-      # 若与仓库中已提交的内容不一致，说明提交的制品不是当前源码的产物。
+      # 两段式：frontend/ 下的前端制品是确定性的，直接 git diff；清单里的 backend 摘要
+      # 会随工具链/平台变化（digest --write 会改写 backend.digest），交给 python 脚本
+      # 归一化后再比较整份清单，既能拦「改了 Vue 源码没重提交 dist」，也能拦
+      # 「只改了清单没提交」。
       - name: Fail on committed artifact drift
         working-directory: plugin
         run: |
           set -euo pipefail
-          if ! git diff --quiet -- "$PACKAGE_DIR"; then
-            echo "::error title=构建产物漂移::extension build 改写了已提交的制品或摘要；请本地执行 scripts/prepare-package.sh 后提交这些文件。"
-            git --no-pager diff -- "$PACKAGE_DIR"
+          if ! git diff --quiet -- "$PACKAGE_DIR/frontend"; then
+            echo "::error title=制品漂移::前端制品或清单摘要与本次构建结果不一致；请本地执行 scripts/prepare-package.sh 后提交 frontend/ 与 sforum.extension.json。"
+            git --no-pager diff -- "$PACKAGE_DIR/frontend"
             exit 1
           fi
+          python3 scripts/check-manifest-drift.py "$PACKAGE_DIR"
 
       - name: Package smoke test
         working-directory: sforum/apps/api

@@ -149,19 +149,32 @@ go run ./cmd/sforum extension brand check ../../../sforum-demo-plugin/plugins/sf
 
 ## 发布
 
-推 `v*` 标签即触发 [release 工作流](.github/workflows/release.yml)：
+推 `v*` 标签即触发 [release 工作流](.github/workflows/release.yml)。流水线先由 `plan` 读清单判定包形态，
+再按形态决定构建矩阵与产物：
 
-1. `verify`：校验标签与清单 `version` 一致，再跑 `extension build`、`brand check`、`validate`、`test`。
-2. `package`：重新构建一次保证 zip 与清单摘要同源，用 `extension package --exclude-source` 打成
-   `sforum-demo-plugin_<version>.zip`（纯前端制品，一份包全平台通用），连同 `.zip.sbom.json`
-   生成 `SHA256SUMS`。
-3. `publish`：先 `sha256sum -c SHA256SUMS` 复核，再创建（或更新）Release 并上传资产。
+| 清单形态 | 产物 | 资产名 |
+| --- | --- | --- |
+| 未声明 `backend`（本插件当前形态） | 一个纯前端 zip | `sforum-demo-plugin_<version>.zip` |
+| 声明了 `backend` | 四平台各一份：`linux/amd64`、`linux/arm64`、`darwin/arm64`、`darwin/amd64`，每个平台各自重算摘要后打包 | `sforum-demo-plugin_<version>_<os>_<arch>.zip` |
+
+1. `plan`：只按清单里有没有 `backend` 判定，不看目录里是否存在 `backend/`；据此生成矩阵，
+   无后端时矩阵退化为单个空目标。
+2. `verify`：校验标签与清单 `version` 一致；清单声明 `backend` 时先编译本机二进制，再跑
+   `extension build`、`brand check`、`validate`、`test`，最后比对 `frontend/` 是否等于本次构建结果。
+3. `build`：矩阵逐目标构建——rsync 出只含运行时文件的 stage，`extension digest --write` 在该目标上
+   重算摘要，`validate` 后打成 zip（Go 源码、`go.mod`、旧二进制不进包）。
+4. `publish`：汇总所有平台的 zip 与 `.zip.sbom.json`，生成 `SHA256SUMS`，创建（或更新）Release 并上传。
+
+为什么无后端时不发四份：宿主对没有 `backend.entry` 的包不做平台门，扩展商城也按 `any/any` 识别，
+四份字节相同的包只会在下载页多出三条无意义的选择。带后端的包则必须按平台分发——`backend.digest`
+与该平台的 `backend/plugin` 二进制一一对应，跨平台包不可混用。
 
 发布前把 `plugins/sforum-demo-plugin/sforum.extension.json` 的 `version` 提到与标签一致
-（例如 `0.1.0` ↔ `v0.1.0`），否则 `verify` 直接失败。日常推送与 PR 由
+（例如 `0.1.1` ↔ `v0.1.1`），否则 `verify` 直接失败。日常推送与 PR 由
 [ci 工作流](.github/workflows/ci.yml) 跑同一套构建与校验，并额外检查
-「提交的 `dist/` 是否等于当前源码的构建结果」——制品漂移会直接失败，所以构建产物必须跟源码一起提交。
-release 的 `verify` 也带同样的漂移检查：标签构建如果改写了已提交的制品，发布会在打包前失败。
+「提交的前端制品是否等于当前源码的构建结果」——制品漂移会直接失败，所以 `dist/` 必须跟源码一起提交。
+release 的 `verify` 也带同样的检查，且只比对 `frontend/`：Go 二进制跨工具链不会字节一致，
+拿它当硬门会误杀正常构建。标签构建如果改写了已提交的前端产物，发布会在打包前失败。
 
 ## 技术要点
 

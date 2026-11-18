@@ -7,5 +7,9 @@ node_modules/
 .build/
 *.sforum.zip
 
+# 后端二进制是构建产物，不进 git（清单里的 backend.digest 由 extension digest 刷新）
+/plugins/*/backend/plugin
+/plugins/*/backend/plugin.exe
+
 # 系统杂项
 .DS_Store

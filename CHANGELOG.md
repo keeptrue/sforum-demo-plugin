@@ -3,6 +3,16 @@
 本文件记录 SForum Demo Plugin 的变更，格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.1] - 2026-11-18
+
+### 变更
+
+- 发布流水线支持条件平台矩阵：清单未声明 `backend` 的插件发一个通用 zip；声明了 `backend` 的插件
+  自动按 `linux/amd64`、`linux/arm64`、`darwin/arm64`、`darwin/amd64` 四平台交叉编译、各自刷新摘要
+  后打包，资产名带平台后缀。
+- CI 与本地脚本同步支持条件构建：`scripts/prepare-package.sh` 与 ci 工作流在清单声明 `backend` 时
+  先编译 `backend/plugin`，无后端时跳过；CI 仍只做单平台验证，四平台矩阵只在发布时展开。
+
 ## [0.1.0] - 2026-11-18
 
 首个可安装版本：演示 SForum 插件的管理端菜单注册与自构建前端页面。
@@ -32,3 +42,4 @@
   摘要与内容不一致时启用会被拒绝。
 
 [0.1.0]: https://github.com/keeptrue/sforum-demo-plugin/releases/tag/v0.1.0
+[0.1.1]: https://github.com/keeptrue/sforum-demo-plugin/releases/tag/v0.1.1

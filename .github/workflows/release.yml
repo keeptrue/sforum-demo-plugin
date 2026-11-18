@@ -1,7 +1,9 @@
 name: release
 
-# 推 v* 标签即发布：校验标签与清单版本一致 → 构建前端制品并打 SForum 包 → 挂到 Release。
-# 本包是纯前端通用包，没有 Go 后端，也没有平台矩阵：同一个 zip 适用于所有平台。
+# 推 v* 标签即发布：先由 plan 按「清单是否声明 backend」判定包形态，再按形态构建与打包。
+#  - 清单声明 backend：linux/amd64、linux/arm64、darwin/arm64、darwin/amd64 四个平台各一个包，
+#    每个包里的 backend.digest 与该平台二进制一一对应。
+#  - 清单没有 backend（如本示例）：纯前端通用包，只发一个 zip，不区分平台。
 # 仓库根是「外部扩展源根」，扩展包位于 plugins/sforum-demo-plugin。
 # workflow_dispatch 只做校验与打包（不创建 Release），用于预演发布。
 
@@ -25,9 +27,37 @@ env:
   PACKAGE_SLUG: sforum-demo-plugin
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      has_backend: ${{ steps.detect.outputs.has_backend }}
+      matrix: ${{ steps.detect.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: plugin
+
+      # 形态只按清单判定，不看目录里有没有 backend/。
+      - name: Detect backend and build matrix
+        id: detect
+        working-directory: plugin
+        run: |
+          set -euo pipefail
+          HAS_BACKEND="$(python3 -c "import json;print('true' if json.load(open('$PACKAGE_DIR/sforum.extension.json')).get('backend') else 'false')")"
+          if [ "$HAS_BACKEND" = "true" ]; then
+            MATRIX='{"include":[{"goos":"linux","goarch":"amd64"},{"goos":"linux","goarch":"arm64"},{"goos":"darwin","goarch":"arm64"},{"goos":"darwin","goarch":"amd64"}]}'
+          else
+            MATRIX='{"include":[{"goos":"","goarch":""}]}'
+          fi
+          echo "has_backend=$HAS_BACKEND" >> "$GITHUB_OUTPUT"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "has_backend=$HAS_BACKEND"
+          echo "matrix=$MATRIX"
+
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,6 +90,19 @@ jobs:
             exit 1
           fi
 
+      # 带后端的包必须先有 backend/plugin：extension build 里的 digest/validate/test
+      # 会在清单声明 backend 时要求该二进制存在。纯前端包整步跳过。
+      - name: Build backend binary when the manifest declares one
+        working-directory: plugin
+        run: |
+          set -euo pipefail
+          HAS_BACKEND="$(python3 -c "import json;print('true' if json.load(open('$PACKAGE_DIR/sforum.extension.json')).get('backend') else 'false')")"
+          if [ "$HAS_BACKEND" != "true" ]; then
+            echo "manifest declares no backend in $PACKAGE_DIR/sforum.extension.json; skipping backend build"
+            exit 0
+          fi
+          (cd "$PACKAGE_DIR/backend" && CGO_ENABLED=0 go build -trimpath -o "$GITHUB_WORKSPACE/plugin/$PACKAGE_DIR/backend/plugin" ./)
+
       - name: Build frontend, refresh digests and run host gates
         working-directory: sforum/apps/api
         run: |
@@ -70,22 +113,28 @@ jobs:
           go run ./cmd/sforum extension validate "$PKG"
           go run ./cmd/sforum extension test "$PKG"
 
-      # extension build 会重写 frontend/admin/dist/* 与清单里的 digest；与 CI 一样，
-      # 提交的制品必须等于当前源码的构建结果，否则打出来的包不是这个标签该有的内容。
+      # 两段式：frontend/ 下的前端制品是确定性的，直接 git diff；清单里的 backend 摘要
+      # 会随工具链/平台变化（digest --write 会改写 backend.digest），交给 python 脚本
+      # 归一化后再比较整份清单，既能拦「改了 Vue 源码没重提交 dist」，也能拦
+      # 「只改了清单没提交」。
       - name: Fail on committed artifact drift
         working-directory: plugin
         run: |
           set -euo pipefail
-          if ! git diff --quiet -- "$PACKAGE_DIR"; then
-            echo "::error title=构建产物漂移::extension build 改写了已提交的制品或摘要；请本地执行 scripts/prepare-package.sh 后提交这些文件。"
-            git --no-pager diff -- "$PACKAGE_DIR"
+          if ! git diff --quiet -- "$PACKAGE_DIR/frontend"; then
+            echo "::error title=制品漂移::前端制品或清单摘要与本次构建结果不一致；请本地执行 scripts/prepare-package.sh 后提交 frontend/ 与 sforum.extension.json。"
+            git --no-pager diff -- "$PACKAGE_DIR/frontend"
             exit 1
           fi
+          python3 scripts/check-manifest-drift.py "$PACKAGE_DIR"
 
-  package:
-    needs: verify
+  build:
+    needs: plan
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -102,85 +151,108 @@ jobs:
           go-version-file: sforum/apps/api/go.mod
           cache-dependency-path: sforum/apps/api/go.sum
 
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.2
-
-      # 打包前重新构建一次，确保 zip 里的制品与清单摘要来自同一次构建。
-      - name: Build frontend and refresh exact digests
-        working-directory: sforum/apps/api
-        run: go run ./cmd/sforum extension build "$GITHUB_WORKSPACE/plugin/$PACKAGE_DIR"
-
-      - name: Package release zip
+      # 这一步只跑 digest / validate / package，都是宿主 Go CLI，不需要 Bun
+      # （前端制品是仓库里已提交的 dist，构建与校验在 verify 里做）。
+      - name: Build package for this target
         id: package
-        working-directory: plugin
         run: |
           set -euo pipefail
-          VERSION="$(python3 -c "import json;print(json.load(open('$PACKAGE_DIR/sforum.extension.json'))['version'])")"
-          ASSET="${PACKAGE_SLUG}_${VERSION}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          STAGE="$GITHUB_WORKSPACE/stage"
+          rm -rf "$STAGE"; mkdir -p "$STAGE"
+          # 只把运行时需要的文件放进发布包：Go 源码、go.mod/sum、旧二进制都不进 stage。
+          rsync -a \
+            --exclude '/backend/*.go' --exclude '/backend/go.mod' --exclude '/backend/go.sum' \
+            --exclude '/backend/plugin' --exclude '/backend/plugin.exe' \
+            "plugin/$PACKAGE_DIR/" "$STAGE/"
+
+          if [ "${{ needs.plan.outputs.has_backend }}" = "true" ]; then
+            echo "building backend binary for ${{ matrix.goos }}/${{ matrix.goarch }}"
+            mkdir -p "$STAGE/backend"
+            (cd "plugin/$PACKAGE_DIR/backend" && \
+              CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+              go build -trimpath -ldflags "-s -w" -o "$STAGE/backend/plugin" ./)
+          else
+            echo "manifest declares no backend: building the single generic frontend-only package"
+          fi
+
+          VERSION="$(python3 -c "import json;print(json.load(open('plugin/$PACKAGE_DIR/sforum.extension.json'))['version'])")"
+          # 有后端才带平台后缀；无后端用裸版本号，避免出现 sforum-demo-plugin_0.1.0__ 这种空后缀。
+          if [ -n "${{ matrix.goos }}" ]; then
+            ASSET="${PACKAGE_SLUG}_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          else
+            ASSET="${PACKAGE_SLUG}_${VERSION}"
+          fi
           echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
-          mkdir -p dist
-          # 本步骤的 cwd 是 plugin/，宿主检出在 $GITHUB_WORKSPACE/sforum，必须用绝对路径进宿主 CLI 目录。
-          (cd "$GITHUB_WORKSPACE/sforum/apps/api" && go run ./cmd/sforum extension package "$GITHUB_WORKSPACE/plugin/$PACKAGE_DIR" --exclude-source -o "$GITHUB_WORKSPACE/plugin/dist/$ASSET.zip")
-          # extension package 会把 SBOM 写在 zip 旁边：dist/<asset>.zip.sbom.json
-          # 校验和写裸文件名（在 dist/ 内计算），这样 publish 把产物下载到 dist/ 后
-          # `cd dist && sha256sum -c SHA256SUMS` 才能直接命中，而不是去找 dist/dist/<name>。
-          (cd dist && sha256sum "$ASSET.zip" "$ASSET.zip.sbom.json" > SHA256SUMS)
-          cat "dist/SHA256SUMS"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cd sforum/apps/api
+          # 每个平台的二进制不同，摘要必须在该平台的 stage 上重新写入后再打包。
+          go run ./cmd/sforum extension digest --write "$STAGE"
+          go run ./cmd/sforum extension validate "$STAGE"
+          go run ./cmd/sforum extension package "$STAGE" --exclude-source -o "$GITHUB_WORKSPACE/dist/$ASSET.zip"
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: package
-          # uses: 步骤不支持 working-directory，路径相对 $GITHUB_WORKSPACE 解析，
-          # 而 zip 是上一个步骤在 plugin/ 下生成的。
+          name: ${{ steps.package.outputs.asset }}
           path: |
-            plugin/dist/*.zip
-            plugin/dist/*.zip.sbom.json
-            plugin/dist/SHA256SUMS
+            dist/*.zip
+            dist/*.zip.sbom.json
           if-no-files-found: error
 
   publish:
-    needs: package
+    needs: [plan, build]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download package artifact
+      - name: Download all package artifacts
         uses: actions/download-artifact@v4
         with:
-          name: package
           path: dist
+          merge-multiple: true
 
-      - name: Verify checksums
+      - name: Compute checksums
         working-directory: dist
-        run: sha256sum -c SHA256SUMS
+        run: |
+          set -euo pipefail
+          # 裸文件名：产物就在 dist/ 内，`cd dist && sha256sum -c SHA256SUMS` 直接命中。
+          sha256sum *.zip *.zip.sbom.json > SHA256SUMS
+          cat SHA256SUMS
 
       - name: Create release and upload assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
+          HAS_BACKEND: ${{ needs.plan.outputs.has_backend }}
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
+          if [ "$HAS_BACKEND" = "true" ]; then
+            DOWNLOAD_LINE='下载与服务器平台匹配的压缩包（`linux_amd64` / `linux_arm64` / `darwin_arm64` / `darwin_amd64`）。'
+            SHAPE_LINE='每个平台的压缩包里，`backend.digest` 与该平台的 `backend/plugin` 二进制一一对应；跨平台包不可混用。'
+          else
+            DOWNLOAD_LINE='下载 `'"$PACKAGE_SLUG"'_'"$VERSION"'.zip`。这是纯前端通用包，没有平台区分，任何平台共用同一个 zip。'
+            SHAPE_LINE='本包不含 Go 后端，运行时只加载 `frontend/admin/dist/dashboard.mjs` 与 `frontend/admin/dist/dashboard.css`。'
+          fi
           {
             echo '## 安装'
             echo
-            echo '1. 下载 `'"$PACKAGE_SLUG"'_'"$VERSION"'.zip`。这是纯前端通用包，没有平台区分，任何平台共用同一个 zip。'
+            echo '1. '"$DOWNLOAD_LINE"
             echo '2. 装到 SForum：后台「插件管理 → 安装插件」上传 zip；或把 zip 解压到某个外部扩展源根的 `plugins/'"$PACKAGE_SLUG"'/`（即本仓库的目录布局），重启 API 让宿主扫描。'
             echo '3. 后台启用 **SForum Demo Plugin**，按宿主提示完成一次 exact-artifact `super_admin` 信任确认 —— 未确认前宿主不会导入包内的前端制品。'
             echo '4. 需要「管理」能力的角色，到「角色权限」授予 `sforum.demo-plugin.manage`。'
             echo '5. 启用后在后台侧栏新增「示例」分组，包含「示例面板」与「示例设置」两个菜单页。'
             echo
-            echo '压缩包内的清单摘要与 `frontend/admin/dist/` 制品一一对应；校验：`sha256sum -c SHA256SUMS`。'
+            echo '压缩包内的清单摘要与包内制品一一对应；校验：`sha256sum -c SHA256SUMS`。'
             echo
             echo '## 兼容性'
             echo
             echo '使用 Manifest V3（`sforum.manifest@3`），需要 SForum `>=3.1.0`。'
-            echo '本包不含 Go 后端，运行时只加载 `frontend/admin/dist/dashboard.mjs` 与 `frontend/admin/dist/dashboard.css`。'
+            echo "$SHAPE_LINE"
           } > notes.md
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --title "$TAG" --notes-file notes.md

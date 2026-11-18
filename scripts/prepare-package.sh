@@ -68,6 +68,16 @@ sforum_cli() {
   (cd "$SFORUM_DIR/apps/api" && go run ./cmd/sforum "$@")
 }
 
+# 带后端的包必须先有 backend/plugin：extension build 里的 digest/validate/test 会在
+# 清单声明 backend 时要求该二进制存在。纯前端包整步跳过。
+HAS_BACKEND="$(python3 -c "import json,sys;print('true' if json.load(open(sys.argv[1])).get('backend') else 'false')" "$PKG/sforum.extension.json")"
+if [ "$HAS_BACKEND" = "true" ]; then
+  echo "==> 清单声明 backend：先构建 backend/plugin（CGO_ENABLED=0，与宿主 dev watcher 同参）"
+  (cd "$PKG/backend" && CGO_ENABLED=0 go build -trimpath -o "$PKG/backend/plugin" ./)
+else
+  echo "==> 清单没有 backend 字段：纯前端包，跳过后端构建"
+fi
+
 echo "==> 构建前端并刷新精确摘要（extension build：bun 构建 + digest + validate + test）"
 sforum_cli extension build "$PKG"
 
@@ -80,20 +90,32 @@ sforum_cli extension validate "$PKG"
 echo "==> 宿主契约检查（extension test）"
 sforum_cli extension test "$PKG"
 
-# 构建会重写 frontend/admin/dist/* 与清单里的 digest；提示作者提交这些改动，
-# 否则 CI 的产物漂移检查会失败。
+# 提示需要提交的内容：前端制品会被重写；清单里的 backend 摘要 churn 由
+# scripts/check-manifest-drift.py 归一化掉，其余清单改动仍要求提交。
 REL_PKG="${PKG#"$ROOT"/}"
 if [ "$REL_PKG" != "$PKG" ] && git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  if ! git -C "$ROOT" diff --quiet -- "$REL_PKG"; then
-    echo "==> 本次构建改写了已提交的制品，记得提交这些变更："
-    git --no-pager -C "$ROOT" diff --stat -- "$REL_PKG"
+  NEED_COMMIT=0
+  if ! git -C "$ROOT" diff --quiet -- "$REL_PKG/frontend"; then
+    NEED_COMMIT=1
+  fi
+  if ! (cd "$ROOT" && python3 scripts/check-manifest-drift.py "$REL_PKG" >/dev/null 2>&1); then
+    NEED_COMMIT=1
+  fi
+  if [ "$NEED_COMMIT" = "1" ]; then
+    echo "==> 本次构建改写了前端制品或清单摘要，记得提交这些变更："
+    git --no-pager -C "$ROOT" diff --stat -- "$REL_PKG/frontend" "$REL_PKG/sforum.extension.json"
   fi
 fi
 
 if [ "$DO_PACKAGE" = "1" ]; then
   VERSION="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['version'])" "$PKG/sforum.extension.json")"
   SLUG="$(basename "$PKG")"
-  ASSET="${SLUG}_${VERSION}.zip"
+  # 与 release 流水线同名：带后端的包按本机平台加后缀，纯前端包用裸版本号。
+  if [ "$HAS_BACKEND" = "true" ]; then
+    ASSET="${SLUG}_${VERSION}_$(go env GOOS)_$(go env GOARCH).zip"
+  else
+    ASSET="${SLUG}_${VERSION}.zip"
+  fi
   mkdir -p "$ROOT/dist"
   echo "==> 打包发布 zip（extension package --exclude-source）"
   sforum_cli extension package "$PKG" --exclude-source -o "$ROOT/dist/$ASSET"
