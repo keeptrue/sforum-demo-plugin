@@ -1,0 +1,11 @@
+# 依赖
+node_modules/
+
+# 构建与发布产物（仓库根的 dist/ 只放本地/CI 打出来的 zip；
+# 插件自身的 frontend/admin/dist/ 是必须提交的运行时制品，不能被忽略）
+/dist/
+.build/
+*.sforum.zip
+
+# 系统杂项
+.DS_Store

@@ -1,0 +1,83 @@
+name: ci
+
+# 纯前端示例插件（无 Go 后端）：推送到 main / PR 时检出宿主 SForum 源码，
+# 用宿主 CLI 构建前端制品、刷新精确摘要、校验清单与宿主契约，
+# 最后确认提交的制品与本次构建结果一致。
+# 仓库根就是「外部扩展源根」，扩展包位于 plugins/sforum-demo-plugin。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SFORUM_REPOSITORY: keeptrue/SForum
+  # 宿主的 extension build / validate / test 行为随 main 演进；需要锁定时把
+  # 下面的 SFORUM_REF 改成 tag 或 commit。
+  SFORUM_REF: main
+  PACKAGE_DIR: plugins/sforum-demo-plugin
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout plugin repo
+        uses: actions/checkout@v4
+        with:
+          path: plugin
+
+      - name: Checkout SForum framework
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SFORUM_REPOSITORY }}
+          ref: ${{ env.SFORUM_REF }}
+          path: sforum
+
+      # 本包没有 Go 代码，但宿主 CLI 是 Go 程序，需要按宿主 go.mod 装工具链。
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: sforum/apps/api/go.mod
+          cache-dependency-path: sforum/apps/api/go.sum
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Build frontend and refresh exact digests
+        working-directory: sforum/apps/api
+        run: go run ./cmd/sforum extension build "$GITHUB_WORKSPACE/plugin/$PACKAGE_DIR"
+
+      - name: Brand asset check
+        working-directory: sforum/apps/api
+        run: go run ./cmd/sforum extension brand check "$GITHUB_WORKSPACE/plugin/$PACKAGE_DIR"
+
+      - name: Manifest validation
+        working-directory: sforum/apps/api
+        run: go run ./cmd/sforum extension validate "$GITHUB_WORKSPACE/plugin/$PACKAGE_DIR"
+
+      - name: Host contract checks
+        working-directory: sforum/apps/api
+        run: go run ./cmd/sforum extension test "$GITHUB_WORKSPACE/plugin/$PACKAGE_DIR"
+
+      # extension build 会重写 frontend/admin/dist/* 与清单里的 digest；
+      # 若与仓库中已提交的内容不一致，说明提交的制品不是当前源码的产物。
+      - name: Fail on committed artifact drift
+        working-directory: plugin
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet -- "$PACKAGE_DIR"; then
+            echo "::error title=构建产物漂移::extension build 改写了已提交的制品或摘要；请本地执行 scripts/prepare-package.sh 后提交这些文件。"
+            git --no-pager diff -- "$PACKAGE_DIR"
+            exit 1
+          fi
+
+      - name: Package smoke test
+        working-directory: sforum/apps/api
+        run: go run ./cmd/sforum extension package "$GITHUB_WORKSPACE/plugin/$PACKAGE_DIR" --exclude-source -o /tmp/plugin.zip

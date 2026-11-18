@@ -1,0 +1,134 @@
+{
+  "admin": {
+    "entry": "/demo",
+    "pages": [
+      {
+        "component": {
+          "apiVersion": 1,
+          "css": "frontend/admin/dist/dashboard.css",
+          "entry": "frontend/admin/dist/dashboard.mjs",
+          "id": "dashboard"
+        },
+        "description": "菜单注册与自构建前端页面演示",
+        "group": "示例",
+        "icon": "i-lucide-sparkles",
+        "label": "示例面板",
+        "menu": true,
+        "order": 10,
+        "path": "/demo",
+        "permission": "sforum.demo-plugin.manage",
+        "view": "component"
+      },
+      {
+        "description": "插件设置文档演示",
+        "group": "示例",
+        "icon": "i-lucide-sliders-horizontal",
+        "label": "示例设置",
+        "menu": true,
+        "order": 20,
+        "path": "/demo/settings",
+        "view": "settings"
+      }
+    ]
+  },
+  "author": {
+    "name": "SForum",
+    "url": "https://github.com/keeptrue/sforum"
+  },
+  "description": "SForum 示例插件：管理端菜单注册与自构建前端页面",
+  "id": "sforum.demo-plugin",
+  "manifestVersion": 3,
+  "name": "SForum Demo Plugin",
+  "packageFiles": [
+    {
+      "digest": "276e54318ae2950d836df0245d896572a4cb2db39922411535926d5f35747e58",
+      "id": "sforum.demo-plugin.file.admin-dashboard-entry",
+      "kind": "frontend",
+      "path": "frontend/admin/dist/dashboard.mjs"
+    },
+    {
+      "digest": "b48af8bd9102b8db6012a7da01cbf238c8942ee1ce8abe2a1a56de3961fc1d72",
+      "id": "sforum.demo-plugin.file.admin-dashboard-style",
+      "kind": "asset",
+      "path": "frontend/admin/dist/dashboard.css"
+    }
+  ],
+  "permissionDefinitions": [
+    {
+      "assignmentPolicy": "host",
+      "contractVersion": "sforum.demo-plugin.manage@1",
+      "description": "查看示例面板并演示插件页面交互",
+      "key": "sforum.demo-plugin.manage",
+      "label": "管理示例插件",
+      "recommendedRoles": [
+        "administrator"
+      ]
+    }
+  ],
+  "permissions": [
+    "sforum.demo-plugin.manage"
+  ],
+  "settings": {
+    "fields": [
+      {
+        "default": "true",
+        "description": "仅用于演示宿主渲染的设置文档，不影响示例面板的行为",
+        "group": "",
+        "groupId": "general",
+        "key": "sforum.demo-plugin.enabled",
+        "label": "演示开关（仅展示）",
+        "placeholder": "",
+        "type": "boolean"
+      }
+    ],
+    "schemaVersion": 1,
+    "ui": {
+      "callouts": [
+        {
+          "body": {
+            "en-US": "This page demonstrates how the host renders a plugin Settings Document; the toggle does not change the demo dashboard's behavior.",
+            "zh-CN": "本页演示宿主如何按 Settings Document 渲染插件设置；这个开关不会改变示例面板的行为。"
+          },
+          "id": "recommended",
+          "linkLabel": "",
+          "tab": "general",
+          "title": {
+            "en-US": "Demo settings (display only)",
+            "zh-CN": "示例设置（仅展示）"
+          },
+          "tone": "info"
+        }
+      ],
+      "groups": [
+        {
+          "columns": 1,
+          "description": "",
+          "id": "general",
+          "label": {
+            "en-US": "General",
+            "zh-CN": "常规"
+          }
+        }
+      ],
+      "layout": "tabs",
+      "mode": "schema",
+      "tabs": [
+        {
+          "description": "",
+          "groups": [
+            "general"
+          ],
+          "id": "general",
+          "label": {
+            "en-US": "General",
+            "zh-CN": "常规"
+          }
+        }
+      ]
+    }
+  },
+  "sforumVersion": "\u003e=3.1.0",
+  "type": "plugin",
+  "url": "https://github.com/keeptrue/sforum-demo-plugin",
+  "version": "0.1.0"
+}
